@@ -67,11 +67,18 @@ class MarketingAttributionSystem:
         logger.info("营销归因与预算优化系统已初始化")
     
     def run_data_collection(self, start_date: Optional[date] = None, 
-                           end_date: Optional[date] = None) -> List[AdPerformanceData]:
+                           end_date: Optional[date] = None,
+                           days: int = 7,
+                           records_per_day: int = 1000) -> pd.DataFrame:
         logger.info("开始数据采集流程...")
         
-        start_date = start_date or date.today() - timedelta(days=7)
-        end_date = end_date or date.today()
+        if start_date is None and end_date is None:
+            end_date = date.today()
+            start_date = end_date - timedelta(days=days - 1)
+        elif start_date is None:
+            start_date = end_date - timedelta(days=days - 1)
+        elif end_date is None:
+            end_date = start_date + timedelta(days=days - 1)
         
         self.operation_logger.log_operation(
             operation_type="data_collection",
@@ -86,7 +93,6 @@ class MarketingAttributionSystem:
         try:
             if self.use_sample_data:
                 total_days = (end_date - start_date).days + 1
-                records_per_day = 10000
                 self._collected_data = self.sample_generator.generate_massive_data(
                     num_days=total_days,
                     records_per_day=records_per_day,
@@ -643,13 +649,17 @@ class MarketingAttributionSystem:
 
 def main():
     parser = argparse.ArgumentParser(description='企业级营销归因与预算优化系统')
-    parser.add_argument('--mode', choices=['demo', 'scheduler', 'pipeline', 'report', 'simulate'],
+    parser.add_argument('--mode', choices=['demo', 'scheduler', 'pipeline', 'collect', 'attribution', 'optimize', 'report', 'simulate'],
                        default='demo', help='运行模式')
     parser.add_argument('--days', type=int, default=7, help='处理天数')
     parser.add_argument('--simulate-name', help='模拟场景名称')
     parser.add_argument('--simulate-channel', help='要调整的渠道')
     parser.add_argument('--simulate-percent', type=float, help='调整百分比(如0.1表示+10%)')
     parser.add_argument('--no-sample', action='store_true', help='不使用示例数据(需要真实API)')
+    parser.add_argument('--no-scheduler', action='store_true', help='演示模式不启动调度器')
+    parser.add_argument('--model', choices=['first_click', 'last_click', 'linear', 'time_decay', 'position_based'],
+                       default='last_click', help='归因模型')
+    parser.add_argument('--records-per-day', type=int, default=1000, help='每天生成的模拟数据量')
     
     args = parser.parse_args()
     
@@ -688,19 +698,92 @@ def main():
                 for fmt, path in report['exported_files'].items():
                     print(f"  {fmt.upper()}: {path}")
             
+            if not args.no_scheduler:
+                print("\n" + "="*60)
+                print("演示完成！启动调度器执行定时任务...")
+                print("="*60)
+                system.start_scheduler()
+                
+                print("\n调度器已启动，按 Ctrl+C 停止...")
+                import time
+                try:
+                    while True:
+                        time.sleep(60)
+                except KeyboardInterrupt:
+                    system.stop_scheduler()
+                    print("\n调度器已停止")
+            else:
+                print("\n" + "="*60)
+                print("演示完成！（未启动调度器）")
+                print("="*60)
+        
+        elif args.mode == 'collect':
+            logger.info(f"数据采集模式，采集 {args.days} 天数据...")
+            data = system.run_data_collection(days=args.days, records_per_day=args.records_per_day)
             print("\n" + "="*60)
-            print("演示完成！启动调度器执行定时任务...")
+            print("数据采集完成:")
             print("="*60)
-            system.start_scheduler()
+            print(f"  采集记录数: {len(data)}")
+            print(f"  数据已保存到内存，可通过其他模式进一步处理")
+            data.to_parquet('data/collected_data.parquet', index=False)
+            print(f"  原始数据已保存: data/collected_data.parquet")
+        
+        elif args.mode == 'attribution':
+            logger.info(f"归因计算模式，使用模型: {args.model}")
+            from models import AttributionModelType
+            model_type = AttributionModelType(args.model)
             
-            print("\n调度器已启动，按 Ctrl+C 停止...")
-            import time
-            try:
-                while True:
-                    time.sleep(60)
-            except KeyboardInterrupt:
-                system.stop_scheduler()
-                print("\n调度器已停止")
+            if system._collected_data is None or (isinstance(system._collected_data, pd.DataFrame) and system._collected_data.empty):
+                system.run_data_collection(days=args.days, records_per_day=args.records_per_day)
+            
+            processed_df = system.run_data_processing()
+            results = system.run_attribution(model_type=model_type, processed_df=processed_df)
+            
+            print("\n" + "="*60)
+            print(f"归因计算完成（模型: {args.model}）:")
+            print("="*60)
+            print(f"  处理转化路径数: {len(results)}")
+            for i, result in enumerate(results[:5]):
+                print(f"\n  路径 #{i+1}:")
+                for channel, contribution in result.contributions.items():
+                    print(f"    {channel}: {contribution:.2f}")
+            
+            import pickle
+            with open('data/attribution_results.pkl', 'wb') as f:
+                pickle.dump(results, f)
+            print(f"\n  归因结果已保存: data/attribution_results.pkl")
+        
+        elif args.mode == 'optimize':
+            logger.info("预算优化模式...")
+            
+            if system._collected_data is None or (isinstance(system._collected_data, pd.DataFrame) and system._collected_data.empty):
+                system.run_data_collection(days=args.days, records_per_day=args.records_per_day)
+            if not system._roi_data:
+                system.run_roi_analysis()
+            
+            suggestions = system.run_budget_optimization()
+            
+            print("\n" + "="*60)
+            print("预算优化建议:")
+            print("="*60)
+            if suggestions:
+                for s in suggestions:
+                    print(f"\n  渠道: {s.channel}")
+                    print(f"    当前预算: {s.current_budget:,.2f} 元")
+                    print(f"    建议预算: {s.suggested_budget:,.2f} 元")
+                    print(f"    调整幅度: {s.adjustment_percent*100:+.1f}%")
+                    print(f"    当前ROI: {s.current_roi:.2f}")
+                    print(f"    预期ROI改善: {s.expected_roi_improvement:.2f}")
+                    print(f"    风险等级: {s.risk_level}")
+                    print(f"    原因: {s.reason}")
+            else:
+                print("  暂无预算调整建议，所有渠道表现正常")
+            
+            import json
+            suggestions_data = [s.model_dump() for s in suggestions]
+            with open('data/budget_suggestions.json', 'w', encoding='utf-8') as f:
+                json.dump(suggestions_data, f, ensure_ascii=False, indent=2, default=str)
+            print(f"\n  预算建议已保存: data/budget_suggestions.json")
         
         elif args.mode == 'scheduler':
             logger.info("启动调度模式...")

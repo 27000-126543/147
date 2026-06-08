@@ -329,6 +329,36 @@ class AttributionEngine:
         logger.info(f"Built {len(paths)} conversion paths")
         return paths
 
+    def summarize_channel_contributions(
+        self,
+        attribution_results: List[AttributionResult]
+    ) -> Dict[str, Any]:
+        if not attribution_results:
+            return {}
+
+        channel_totals = defaultdict(float)
+        channel_counts = defaultdict(int)
+
+        for result in attribution_results:
+            for channel, contribution in result.contributions.items():
+                channel_totals[channel] += contribution
+                channel_counts[channel] += 1
+
+        total_contribution = sum(channel_totals.values())
+        summary = {
+            'channel_contributions': {},
+            'channel_share': {},
+            'channel_interaction_count': dict(channel_counts),
+            'total_contribution': round_float(total_contribution),
+            'total_conversions': len(attribution_results)
+        }
+
+        for channel, total in channel_totals.items():
+            summary['channel_contributions'][channel] = round_float(total)
+            summary['channel_share'][channel] = round_float(total / total_contribution) if total_contribution > 0 else 0.0
+
+        return summary
+
     def _estimate_conversion_value(self, touchpoints: List[TouchPoint]) -> float:
         if not touchpoints:
             return 0.0
